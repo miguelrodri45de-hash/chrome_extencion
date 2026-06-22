@@ -1,0 +1,13 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: Arial, sans-serif;
+  padding: 15px;
+  margin: 0;
+  background-color: #f9f9f9;
+  min-width: 300px;
+}
