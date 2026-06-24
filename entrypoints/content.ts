@@ -3,192 +3,201 @@ export default defineContentScript({
   main() {
     console.log('[Gemini MD] Content script iniciado.');
 
-    // ─── Estado global ────────────────────────────────────────────────────────
-    let lastSnapshotText  = '';          // Último texto capturado
-    let lastChangeTime    = Date.now();  // Cuando cambió por última vez
-    let pendingDownload   = false;       // Flag para evitar descargas dobles
-    let initialMarkTimestamp = Date.now(); // Para ignorar respuestas anteriores al inicio
+    // ─── Estado global ─────────────────────────────────────────────────────────
+    let isMonitoringGeneration = false; // ¿Estamos monitoreando una generación activa?
+    let lastProcessedText      = '';    // Texto de la última respuesta descargada (evitar duplicados)
+    let lastUrl                = location.href;
+    let generationObserver: MutationObserver | null = null;
 
-    // ─── Obtener el panel de respuestas del modelo ────────────────────────────
-    // Intentar múltiples selectores en orden de prioridad
-    function getResponsePanel(): HTMLElement | null {
-      const candidates = [
-        '.conversation-container',
-        'chat-history',
-        'chat-window',
-        '.chat-history',
-        'main',
-        'body',
-      ];
-      for (const sel of candidates) {
-        const el = document.querySelector(sel);
-        if (el) return el as HTMLElement;
-      }
-      return document.body;
+    // ─── Selector del botón de parar (indicador de que Gemini está generando) ──
+    // El botón con aria-label="Stop response" SOLO aparece durante la generación.
+    // Su desaparición = respuesta completa. Este es nuestro indicador de control.
+    function getStopButton(): HTMLElement | null {
+      return (
+        document.querySelector('button[aria-label="Stop response"]') ||
+        document.querySelector('button[aria-label="Detener respuesta"]') ||
+        document.querySelector('button[aria-label="Parar respuesta"]') ||
+        document.querySelector('button[aria-label*="Stop" i][aria-label*="response" i]')
+      ) as HTMLElement | null;
     }
 
-    // ─── Obtener el último bloque de respuesta del modelo ────────────────────
+    // ─── ¿Está Gemini generando actualmente? ──────────────────────────────────
+    function isGenerating(): boolean {
+      return getStopButton() !== null;
+    }
+
+    // ─── Obtener el último bloque de respuesta del modelo ─────────────────────
+    // <model-response> es el custom element de Angular de Gemini (confirmado por DOM real)
     function getLatestModelResponse(): HTMLElement | null {
-      // Selectores en orden de especificidad
-      const selectors = [
-        'model-response',
-        '.model-response',
-        '[data-test-id="model-response"]',
-        'response-container',
-        '.response-container',
-        'message-content',
-        '[data-test-id="message-content"]',
-        'structured-content-container',
-        '.structured-content-container',
-        '.model-response-text',
-      ];
-
-      for (const sel of selectors) {
-        const all = document.querySelectorAll(sel);
-        if (all.length > 0) {
-          return all[all.length - 1] as HTMLElement;
-        }
+      const responses = document.querySelectorAll('model-response');
+      if (responses.length > 0) {
+        return responses[responses.length - 1] as HTMLElement;
       }
-
-      // Fallback: buscar el último párrafo dentro de divs con role=presentation o similares
-      const allTurns = document.querySelectorAll('[class*="response"], [class*="model"], [class*="assistant"]');
-      if (allTurns.length > 0) {
-        return allTurns[allTurns.length - 1] as HTMLElement;
-      }
-
       return null;
     }
 
     // ─── Obtener la fuente HTML para convertir ────────────────────────────────
-    // Intenta primero el contenedor .markdown, si no hay usa el bloque completo
     function getMarkdownSource(responseEl: HTMLElement): HTMLElement {
       const candidates = [
         '.markdown.markdown-main-panel',
         '.markdown-main-panel',
         '.markdown',
+        'message-content',
+        '.message-content',
+        '.model-response-text',
         '[class*="markdown"]',
         '[class*="response-text"]',
-        '.model-response-text',
       ];
       for (const sel of candidates) {
         const found = responseEl.querySelector(sel);
-        if (found && (found.textContent || '').trim().length > 0) {
+        if (found && (found.textContent || '').trim().length > 10) {
           return found as HTMLElement;
         }
       }
+      // Si no encontramos ninguno, retornar el propio elemento de respuesta
       return responseEl;
     }
 
-    // ─── Comprobar si la IA está generando actualmente ────────────────────────
-    function isGenerating(): boolean {
-      // 1. Botón de detener visible
-      const stopBtn = document.querySelector(
-        '[aria-label*="Stop" i], [aria-label*="Detener" i], [aria-label*="Cancelar" i], [aria-label*="Parar" i]'
-      );
-      if (stopBtn && isVisible(stopBtn as HTMLElement)) return true;
+    // ─── Cuando la generación termina ────────────────────────────────────────
+    function onGenerationComplete() {
+      isMonitoringGeneration = false;
+      generationObserver = null;
 
-      // 2. Indicador de carga visible
-      const loader = document.querySelector('.processing-state-visible, [class*="loading"], [class*="spinner"], [class*="thinking"]');
-      if (loader && isVisible(loader as HTMLElement)) return true;
+      console.log('[Gemini MD] Generación completada. Extrayendo respuesta...');
 
-      return false;
+      // Pequeño delay para que el DOM actualice el contenido final
+      setTimeout(() => {
+        const responseEl = getLatestModelResponse();
+        if (!responseEl) {
+          console.warn('[Gemini MD] No se encontró <model-response> en el DOM.');
+          return;
+        }
+
+        const source      = getMarkdownSource(responseEl);
+        const currentText = (source.textContent || '').trim();
+
+        if (currentText.length < 10) {
+          console.warn('[Gemini MD] Respuesta demasiado corta, ignorando.');
+          return;
+        }
+
+        if (currentText === lastProcessedText) {
+          console.log('[Gemini MD] Respuesta ya procesada, ignorando duplicado.');
+          return;
+        }
+
+        lastProcessedText = currentText;
+
+        const mdText   = cleanMarkdown(convertHtmlToMarkdown(source));
+        const filename = generateFilename(mdText);
+
+        console.log('[Gemini MD] Enviando para descarga:', filename);
+
+        browser.runtime.sendMessage({
+          type: 'DOWNLOAD_MARKDOWN',
+          content: mdText,
+          filename: filename,
+        }).then(() => {
+          console.log('[Gemini MD] Mensaje de descarga enviado correctamente.');
+        }).catch((err) => {
+          console.error('[Gemini MD] Error al enviar mensaje de descarga:', err);
+        });
+      }, 500);
     }
 
-    function isVisible(el: HTMLElement): boolean {
-      return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
-    }
+    // ─── Iniciar monitoreo de fin de generación ───────────────────────────────
+    // Se llama cuando detectamos que el botón "Stop response" apareció.
+    // Creamos un MutationObserver que vigila el body hasta que ese botón desaparezca.
+    function startMonitoringForCompletion() {
+      if (isMonitoringGeneration) return;
+      isMonitoringGeneration = true;
 
-    // ─── Ciclo principal de monitoreo ─────────────────────────────────────────
-    function checkForCompletion() {
-      // No hacer nada si ya hay una descarga pendiente
-      if (pendingDownload) return;
+      console.log('[Gemini MD] Botón "Stop response" detectado → Gemini está generando...');
 
-      const responseEl = getLatestModelResponse();
-      if (!responseEl) return;
-
-      const currentText = (responseEl.textContent || '').trim();
-
-      // Ignorar si está vacío
-      if (currentText.length < 10) return;
-
-      const now = Date.now();
-
-      // Si el texto cambió, actualizar timestamp
-      if (currentText !== lastSnapshotText) {
-        lastSnapshotText = currentText;
-        lastChangeTime   = now;
-        return; // Todavía cambia — esperar
-      }
-
-      // Calcular cuánto tiempo lleva sin cambiar
-      const stableMs = now - lastChangeTime;
-
-      // Si el texto lleva menos de 2.5 segundos sin cambiar, esperar
-      if (stableMs < 2500) return;
-
-      // Si aún está generando según la UI, esperar
-      if (isGenerating()) return;
-
-      // Si el elemento ya fue procesado, ignorar
-      if ((responseEl as HTMLElement).dataset.geminiProcessed === 'true') return;
-
-      // ✅ La respuesta está completa y estable — iniciar descarga
-      (responseEl as HTMLElement).dataset.geminiProcessed = 'true';
-      pendingDownload = true;
-
-      console.log('[Gemini MD] Respuesta estable detectada. Convirtiendo a Markdown...');
-
-      const source   = getMarkdownSource(responseEl);
-      const mdText   = cleanMarkdown(convertHtmlToMarkdown(source));
-      const filename = generateFilename(mdText);
-
-      console.log('[Gemini MD] Enviando para descarga:', filename);
-
-      browser.runtime.sendMessage({
-        type: 'DOWNLOAD_MARKDOWN',
-        content: mdText,
-        filename: filename,
-      }).catch((err) => {
-        console.error('[Gemini MD] Error al enviar mensaje:', err);
+      // Usamos un MutationObserver para detectar cuando el botón de stop desaparece
+      const obs = new MutationObserver(() => {
+        if (!isGenerating()) {
+          // El botón de stop desapareció → la generación terminó
+          obs.disconnect();
+          onGenerationComplete();
+        }
       });
 
-      // Resetear para la próxima respuesta tras 3 segundos
-      setTimeout(() => {
-        pendingDownload   = false;
-        lastSnapshotText  = '';
-        console.log('[Gemini MD] Listo para la próxima respuesta.');
-      }, 3000);
+      obs.observe(document.body, {
+        childList:  true,
+        subtree:    true,
+        attributes: true,
+        attributeFilter: ['aria-label', 'hidden', 'style', 'class'],
+      });
+
+      generationObserver = obs;
     }
 
-    // ─── Observador de mutaciones ─────────────────────────────────────────────
-    const observer = new MutationObserver(() => {
-      checkForCompletion();
+    // ─── Observador principal: vigila la aparición del botón "Stop response" ──
+    // Este observador siempre está activo y detecta el inicio de una generación.
+    const mainObserver = new MutationObserver(() => {
+      if (!isMonitoringGeneration && isGenerating()) {
+        startMonitoringForCompletion();
+      }
     });
 
-    observer.observe(document.body, {
-      childList:     true,
-      subtree:       true,
-      characterData: true,
+    mainObserver.observe(document.body, {
+      childList:  true,
+      subtree:    true,
+      attributes: true,
+      attributeFilter: ['aria-label'],
     });
 
-    // ─── Intervalo de respaldo cada 1 segundo ─────────────────────────────────
-    setInterval(checkForCompletion, 1000);
-
-    // ─── Resetear al cambiar de URL (nueva conversación) ─────────────────────
-    let lastUrl = location.href;
+    // ─── Detectar cambios de URL (nueva conversación) ─────────────────────────
     setInterval(() => {
       if (location.href !== lastUrl) {
-        lastUrl          = location.href;
-        lastSnapshotText = '';
-        lastChangeTime   = Date.now();
-        pendingDownload  = false;
-        console.log('[Gemini MD] Nueva URL — estado reiniciado.');
+        lastUrl = location.href;
+
+        // Resetear estado
+        isMonitoringGeneration = false;
+        lastProcessedText      = '';
+
+        if (generationObserver) {
+          generationObserver.disconnect();
+          generationObserver = null;
+        }
+
+        // Marcar las respuestas existentes como ya procesadas para no descargarlas
+        const existingResponse = getLatestModelResponse();
+        if (existingResponse) {
+          const src = getMarkdownSource(existingResponse);
+          lastProcessedText = (src.textContent || '').trim();
+        }
+
+        console.log('[Gemini MD] Nueva URL → estado reiniciado.');
       }
     }, 500);
+
+    // ─── Al cargar la página, marcar respuestas existentes como procesadas ────
+    // Esto evita que al recargar la página se descarguen respuestas anteriores.
+    const initExisting = () => {
+      const existingResponse = getLatestModelResponse();
+      if (existingResponse) {
+        const src = getMarkdownSource(existingResponse);
+        lastProcessedText = (src.textContent || '').trim();
+        console.log('[Gemini MD] Respuesta preexistente marcada (no se descargará).');
+      }
+    };
+
+    // Intentar inicializar después de que el DOM cargue
+    if (document.readyState === 'complete') {
+      initExisting();
+    } else {
+      window.addEventListener('load', initExisting, { once: true });
+      // También intentar después de un segundo por si la SPA carga más tarde
+      setTimeout(initExisting, 1500);
+    }
+
+    console.log('[Gemini MD] Observador activo. Esperando generaciones...');
   },
 });
 
-// ─── Conversión HTML → Markdown ───────────────────────────────────────────────
+// ─── Conversión HTML → Markdown ────────────────────────────────────────────────
 
 function convertHtmlToMarkdown(element: Node): string {
   let md = '';
@@ -232,12 +241,19 @@ function convertHtmlToMarkdown(element: Node): string {
         case 'ol': md += `\n${convertList(el, true)}\n`;  break;
         case 'a': {
           const href = el.getAttribute('href') ?? '';
-          md += `[${convertHtmlToMarkdown(el)}](${href})`;
+          const text = convertHtmlToMarkdown(el);
+          md += href ? `[${text}](${href})` : text;
           break;
         }
         case 'hr': md += '\n\n---\n\n'; break;
         case 'blockquote': md += `\n\n> ${convertHtmlToMarkdown(el).trim().replace(/\n/g, '\n> ')}\n\n`; break;
-        default:   md += convertHtmlToMarkdown(el); break;
+        case 'table': md += convertTable(el); break;
+        // Ignorar elementos de UI (no son contenido de la respuesta)
+        case 'button':
+        case 'svg':
+        case 'mat-icon':
+        case 'img': break;
+        default: md += convertHtmlToMarkdown(el); break;
       }
     }
   }
@@ -266,6 +282,23 @@ function convertList(listEl: HTMLElement, ordered: boolean, depth = 0): string {
     md += `${pad}${prefix}${content.trim()}\n`;
   }
   return md.trimEnd();
+}
+
+function convertTable(tableEl: HTMLElement): string {
+  const rows = Array.from(tableEl.querySelectorAll('tr')) as HTMLElement[];
+  if (rows.length === 0) return '';
+
+  let md = '\n\n';
+  rows.forEach((row, rowIdx) => {
+    const cells = Array.from(row.querySelectorAll('td, th')) as HTMLElement[];
+    const cellTexts = cells.map(c => convertHtmlToMarkdown(c).trim().replace(/\n/g, ' '));
+    md += `| ${cellTexts.join(' | ')} |\n`;
+    if (rowIdx === 0) {
+      md += `| ${cellTexts.map(() => '---').join(' | ')} |\n`;
+    }
+  });
+
+  return md + '\n';
 }
 
 function cleanMarkdown(text: string): string {
