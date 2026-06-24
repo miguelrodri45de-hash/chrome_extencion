@@ -6,7 +6,7 @@ export default defineConfig({
   manifest: {
     name: 'Gemini Automation Bridge',
     description: 'Prueba inicial para cargar texto e imágenes en Gemini.google.com',
-    permissions: ['sidePanel', 'activeTab', 'scripting', 'clipboardWrite'],
+    permissions: ['sidePanel', 'activeTab', 'scripting', 'clipboardWrite', 'downloads'],
     host_permissions: ['https://gemini.google.com/*'],
     action: {
       default_title: 'Abrir Automatizador',
