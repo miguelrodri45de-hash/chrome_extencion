@@ -1,0 +1,46 @@
+[
+    {
+        "id_tarea": "uuid",
+        "nuevo_chat": true,
+        "prompt": "Analiza esta captura de pantalla y describe los 3 principales problemas visuales que encuentres.",
+        "imagenes": [
+            {
+                "nombre": "dashboard_error.png",
+                "tipo": "image/png",
+                "data_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+            }
+        ]
+    },
+    {
+        "id_tarea": "uuid",
+        "nuevo_chat": false,
+        "prompt": "Basándote en el análisis anterior, genera un bloque de código CSS/HTML en Markdown para solucionar el primer problema.",
+        "imagenes": []
+    },
+    {
+        "id_tarea": "uuid",
+        "nuevo_chat": false,
+        "prompt": "Crea una lista corta con conclusiones clave para el reporte técnico final.",
+        "imagenes": []
+    }
+]
+// 
+------------- Actualizar----------------------------------------
+
+git config --global user.email "miguelrodri45de@gmail.com"
+
+git config --global user.name "miguelrodri45de-hash"
+
+git add .
+
+git commit -m "primer commit"
+
+git push
+
+--------------------- Clonar -------------------------------------
+
+git clone https: //github.com/miguelrodri45de-hash/chrome_extencion.git
+
+
+
+tskey-auth-kt7JFBecGD21CNTRL-3EoyGdcwc8eH5p2cmyxM8eemsD1N56YBB
