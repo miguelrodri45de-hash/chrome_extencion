@@ -1,29 +1,51 @@
 export default defineBackground(() => {
-  // Configurar que el sidepanel se abra automáticamente al hacer click en el ícono
-  browser.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+  (browser as any).sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+  console.log('[Gemini MD] Background ready.', { id: (browser as any).runtime.id });
 
-  console.log('Gemini Automation Bridge background ready.', { id: browser.runtime.id });
+  // Wrapper: chrome.downloads.download usa callbacks, no Promises
+  function downloadFile(opts: Record<string, unknown>): Promise<number> {
+    return new Promise((resolve, reject) => {
+      try {
+        (browser as any).downloads.download(opts, (downloadId: number) => {
+          const err = (browser as any).runtime.lastError;
+          if (err) reject(new Error(err.message));
+          else resolve(downloadId);
+        });
+      } catch (e) {
+        reject(e);
+      }
+    });
+  }
 
-  // Escuchar mensajes del content script para descargar archivos Markdown
-  browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message?.type === 'DOWNLOAD_MARKDOWN') {
-      const { content, filename } = message;
-      
-      console.log('Solicitud de descarga recibida:', filename);
-      
-      // Convertir el contenido markdown a Base64 para crear un Data URL
-      const base64Content = btoa(unescape(encodeURIComponent(content)));
-      const dataUrl = `data:text/markdown;base64,${base64Content}`;
-      
-      browser.downloads.download({
-        url: dataUrl,
-        filename: filename,
-        saveAs: false // Descargar directamente sin abrir diálogo
-      }).then((downloadId) => {
-        console.log('Descarga iniciada con ID:', downloadId);
-      }).catch((err) => {
-        console.error('Error al realizar la descarga:', err);
-      });
-    }
-  });
+  (browser as any).runtime.onMessage.addListener(
+    (message: any, _sender: any, sendResponse: (resp: any) => void) => {
+      if (message?.type === 'DOWNLOAD_MARKDOWN') {
+        const { content, filename } = message;
+        console.log('[Gemini MD] Solicitud de descarga:', filename);
+
+        const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+
+        downloadFile({ url, filename, saveAs: false })
+          .then((id) => {
+            console.log('[Gemini MD] ✅ Descargado, ID:', id);
+            setTimeout(() => URL.revokeObjectURL(url), 5000);
+            sendResponse({ success: true, downloadId: id });
+          })
+          .catch((err) => {
+            console.error('[Gemini MD] Error:', err);
+            try {
+              const b64 = btoa(unescape(encodeURIComponent(content)));
+              downloadFile({ url: `data:text/markdown;base64,${b64}`, filename, saveAs: false })
+                .then(id => sendResponse({ success: true, downloadId: id }))
+                .catch(e => sendResponse({ success: false, error: e.message }));
+            } catch (e) {
+              sendResponse({ success: false, error: String(e) });
+            }
+          });
+
+        return true; // Mantener canal abierto para respuesta async
+      }
+    },
+  );
 });
